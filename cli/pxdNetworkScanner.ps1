@@ -46,7 +46,7 @@ param(
     [switch]$Quick
 )
 
-$script:NsVersion = '1.0.1'
+$script:NsVersion = '1.0.2'
 $script:NsUrl = 'pxdtek.com/ns'
 # In-memory mode (set by the pxd Toolkit console while it runs this script): nothing is saved on the PC unless the
 # user exports a report. The CLI keeps no settings, logs or caches anyway.
@@ -60,6 +60,52 @@ $script:NsError = ''
 
 try { Add-Type -AssemblyName System.Net.Http -ErrorAction Stop } catch {}
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}   # TLS 1.2 on PowerShell 5.1
+
+# ======================================================================================
+#  Update before running (pxd standard rule 6)
+# ======================================================================================
+
+# Run from a file (installed by the pxd Toolkit, or saved by hand): if a newer release exists, this file is replaced
+# with it and the new copy runs with the same parameters. Through irm | iex the copy is already the latest, so nothing
+# happens; nor in-memory (PXD_INMEMORY=1) or with PXD_NO_UPDATE=1. Never stops the script: any problem and it just runs.
+# PXD_UPDATE_API / PXD_UPDATE_RAW point the check at another server (tests).
+$script:NsSelf = $MyInvocation.MyCommand.Path
+function Update-NsScript {
+    $self = $script:NsSelf
+    if (-not $self -or -not (Test-Path -LiteralPath $self) -or $env:PXD_INMEMORY -eq '1' -or $env:PXD_NO_UPDATE -eq '1') { return $false }
+    $tmp = "$self.pxdnew"
+    try {
+        if (-not ([IO.File]::ReadAllText($self)).Contains("`$script:NsUrl = 'pxdtek.com/ns'")) { return $false }   # not this script
+        $api = if ($env:PXD_UPDATE_API) { $env:PXD_UPDATE_API.TrimEnd('/') } else { 'https://api.github.com' }
+        $raw = if ($env:PXD_UPDATE_RAW) { $env:PXD_UPDATE_RAW.TrimEnd('/') } else { 'https://raw.githubusercontent.com' }
+        $headers = @{ 'User-Agent' = 'pxd-update/1.0'; 'Accept' = 'application/vnd.github+json' }
+        $rel = Invoke-RestMethod -Uri "$api/repos/joshpack/pxdNetworkScanner/releases/latest" -Headers $headers -TimeoutSec 4 -UseBasicParsing
+        if ([string]$rel.tag_name -notmatch '(\d+)\.(\d+)(?:\.(\d+))?') { return $false }
+        $latest = New-Object Version ([int]$Matches[1]), ([int]$Matches[2]), ([int]('0' + $Matches[3]))
+        if ($latest -le [Version]$script:NsVersion) { return $false }
+        $asset = @($rel.assets) | Where-Object { $_.name -eq 'pxdNetworkScanner.ps1' } | Select-Object -First 1
+        $sum = @($rel.assets) | Where-Object { $_.name -eq 'pxdNetworkScanner.ps1.sha256' } | Select-Object -First 1
+        $url = if ($asset) { $asset.browser_download_url } else { "$raw/joshpack/pxdNetworkScanner/$($rel.tag_name)/cli/pxdNetworkScanner.ps1" }
+        Write-Host "  Updating pxd Network Scanner to $latest..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri $url -OutFile $tmp -Headers @{ 'User-Agent' = 'pxd-update/1.0' } -TimeoutSec 30 -UseBasicParsing
+        if ($sum) {
+            $want = [regex]::Match([string](Invoke-RestMethod -Uri $sum.browser_download_url -Headers @{ 'User-Agent' = 'pxd-update/1.0' } -TimeoutSec 10 -UseBasicParsing), '[0-9a-fA-F]{64}').Value
+            if ($want -and $want -ne (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash) { throw 'checksum mismatch' }
+        }
+        if (-not ([IO.File]::ReadAllText($tmp)).Contains("`$script:NsUrl = 'pxdtek.com/ns'")) { throw 'not the scanner script' }
+        Move-Item -LiteralPath $tmp -Destination $self -Force
+        return $true
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+if (Update-NsScript) {
+    $was = $env:PXD_NO_UPDATE
+    $env:PXD_NO_UPDATE = '1'   # the new copy doesn't check again
+    try { & $script:NsSelf @PSBoundParameters } finally { $env:PXD_NO_UPDATE = $was }
+    return
+}
 
 # ======================================================================================
 #  Ports, groups

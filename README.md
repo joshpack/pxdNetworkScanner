@@ -65,6 +65,8 @@ With options:
 - **With [pxd Toolkit](https://github.com/joshpack/pxdToolkit)** (recommended): pick pxd Network Scanner and press Install. The Toolkit keeps it up to date.
 - **By hand:** download `pxdNetworkScanner-<version>-win-x64.zip` from [Releases](https://github.com/joshpack/pxdNetworkScanner/releases), unzip it anywhere and run `pxdNetworkScanner.exe`. It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
 
+Each time the app starts, it checks for a newer release and installs it into its own folder before opening (a few seconds at most; it just opens when offline). `--report` runs don't update. A saved copy of the PowerShell script does the same: run from a file, it replaces itself with the latest release's script and runs that; through `irm | iex` it's already the latest. Set `PXD_NO_UPDATE=1` to turn either off.
+
 Settings and remembered devices are kept in `%APPDATA%\pxdNetworkScanner`.
 
 ## How the guess works

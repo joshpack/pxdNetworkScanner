@@ -9,6 +9,13 @@ internal static class Program
 {
     public const string AppId = "pxdNetworkScanner";
 
+    /// <summary>Where updates come from: this app's GitHub releases and its Windows zip (the same asset the pxd Toolkit installs).</summary>
+    public const string UpdateRepo = "joshpack/pxdNetworkScanner";
+    public const string UpdateAsset = @"^pxdNetworkScanner-.*-win-x64\.zip$";
+
+    /// <summary>Runs that never update first: the build step and --report (a script waits for this process and its exit code).</summary>
+    public static readonly string[] NoUpdateArgs = ["--write-icon", "--report"];
+
     /// <summary>%APPDATA%\pxdNetworkScanner (window placement, remembered devices), or PXDNS_DATA (tests).</summary>
     public static string DataFolder =>
         Environment.GetEnvironmentVariable("PXDNS_DATA") is { Length: > 0 } custom
@@ -26,6 +33,12 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // pxd standard rule 6: an installed copy updates itself before it opens, however it was started. A no-op for dev
+        // builds (bin\), --self-test, PXD_NO_UPDATE=1, offline or a slow GitHub; when it updated, the new copy is already starting.
+        if (!args.Any(a => NoUpdateArgs.Contains(a, StringComparer.OrdinalIgnoreCase))
+            && pxdStandard.pxdUpdate.BeforeStart(UpdateRepo, UpdateAsset, args))
+            return 0;
+
         if (After(args, "--write-icon") is { } icon)
         {
             BuildAvaloniaApp().SetupWithoutStarting();
