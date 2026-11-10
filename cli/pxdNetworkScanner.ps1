@@ -46,7 +46,7 @@ param(
     [switch]$Quick
 )
 
-$script:NsVersion = '1.0.0'
+$script:NsVersion = '1.0.1'
 $script:NsUrl = 'pxdtek.com/ns'
 # In-memory mode (set by the pxd Toolkit console while it runs this script): nothing is saved on the PC unless the
 # user exports a report. The CLI keeps no settings, logs or caches anyway.
@@ -953,6 +953,10 @@ function Invoke-NsScan($r, [switch]$Quick) {
     Clear-NsStatus
 
     # Merge into what this session has seen: same MAC and IP, else the same MAC on a new IP, else the same IP.
+    # Also what changed since the previous scan of this session, for the summary.
+    $wasOnline = @($script:NsDevices | Where-Object { $_.Online -and (Test-NsInRange $r $_.Ip) })
+    $firstScan = -not $script:NsLastScan -or $script:NsLastScan.Range -ne $r.Text
+    $script:NsNew = New-Object System.Collections.Generic.List[object]
     foreach ($s in $script:NsDevices) { if (Test-NsInRange $r $s.Ip) { $s.Online = $false } }
     foreach ($d in $found.Values) {
         $kept = $null
@@ -966,9 +970,112 @@ function Invoke-NsScan($r, [switch]$Quick) {
             $i = $script:NsDevices.IndexOf($kept)
             $d.FirstSeen = $first
             $script:NsDevices[$i] = $d
-        } else { $script:NsDevices.Add($d) }
+        } else { $script:NsDevices.Add($d); if (-not $firstScan) { $script:NsNew.Add($d) } }
     }
+    $script:NsGone = @($wasOnline | Where-Object { -not $_.Online -and $script:NsDevices.Contains($_) })
     $script:NsLastScan = [pscustomobject]@{ Range = $r.Text; When = (Get-Date); Seconds = $clock.Elapsed.TotalSeconds; Count = $found.Count }
+}
+
+# ======================================================================================
+#  The short, colourful summary shown under the results after each scan
+# ======================================================================================
+
+function Get-NsInsights($online) {
+    # level: bad (red), warn (yellow), info (cyan), good (green)
+    $out = New-Object System.Collections.Generic.List[object]
+    $label = { param($d) $n = Get-NsName $d; if ($n -eq $d.Ip) { $d.Ip } else { "$n ($($d.Ip))" } }
+    $list = { param($ds) $names = @($ds | Select-Object -First 3 | ForEach-Object { & $label $_ }); $more = @($ds).Count - $names.Count; ($names -join ', ') + $(if ($more -gt 0) { " and $more more" } else { '' }) }
+    $telnet = @($online | Where-Object { $_.Ports -contains 23 })
+    if ($telnet) { $out.Add(@('bad', "Telnet is open on $(& $list $telnet): it sends passwords in plain text; turn it off.")) }
+    $ftp = @($online | Where-Object { $_.Ports -contains 21 })
+    if ($ftp) { $out.Add(@('warn', "FTP is open on $(& $list $ftp): unencrypted file transfer.")) }
+    $vnc = @($online | Where-Object { $_.Ports -contains 5900 -and -not $_.IsSelf })
+    if ($vnc) { $out.Add(@('warn', "Screen sharing (VNC) is open on $(& $list $vnc).")) }
+    $rdp = @($online | Where-Object { $_.Ports -contains 3389 -and -not $_.IsSelf })
+    if ($rdp) { $out.Add(@('info', "Remote Desktop answers on $(& $list $rdp).")) }
+    $unknown = @($online | Where-Object { $_.Kind -eq 'Unknown' })
+    if ($unknown) { $out.Add(@('warn', "$($unknown.Count) device$(if ($unknown.Count -ne 1) { 's' }) nothing could identify: $(& $list $unknown).")) }
+    if ($script:NsNew -and $script:NsNew.Count) { $out.Add(@('good', "New since the last scan: $(& $list $script:NsNew).")) }
+    if ($script:NsGone -and $script:NsGone.Count) { $out.Add(@('warn', "Gone since the last scan: $(& $list $script:NsGone).")) }
+    , $out
+}
+
+function Show-NsReport {
+    $online = @($script:NsDevices | Where-Object { $_.Online -and (Test-NsInRange $script:NsRange $_.Ip) })
+    $offline = @($script:NsDevices | Where-Object { -not $_.Online -and (Test-NsInRange $script:NsRange $_.Ip) })
+    $full = [string][char]0x2588; $dim = [string][char]0x2591; $dot = [string][char]0x00B7
+    $w = 100; try { $w = $Host.UI.RawUI.WindowSize.Width - 2 } catch {}
+    $rule = [Math]::Max(30, [Math]::Min(72, $w - 4))
+
+    Write-Host ''
+    $title = " Summary of $($script:NsLastScan.Range) "
+    Write-Host ('  ' + ([string][char]0x2500) * 3) -NoNewline -ForegroundColor DarkCyan
+    Write-Host $title -NoNewline -ForegroundColor Cyan
+    Write-Host (([string][char]0x2500) * [Math]::Max(3, $rule - 3 - $title.Length)) -ForegroundColor DarkCyan
+
+    # The headline numbers
+    Write-Host '  ' -NoNewline
+    Write-Host "$($online.Count)" -NoNewline -ForegroundColor Green; Write-Host ' online' -NoNewline -ForegroundColor Gray
+    if ($offline.Count) { Write-Host "   $($offline.Count)" -NoNewline -ForegroundColor DarkGray; Write-Host ' offline' -NoNewline -ForegroundColor DarkGray }
+    $makers = @($online | Where-Object { $_.Vendor } | Group-Object Vendor).Count
+    Write-Host "   $makers" -NoNewline -ForegroundColor Cyan; Write-Host ' makers' -NoNewline -ForegroundColor Gray
+    Write-Host "   $([Math]::Round($script:NsLastScan.Seconds, 1)) s" -NoNewline -ForegroundColor Magenta; Write-Host ' to scan' -ForegroundColor Gray
+    Write-Host ''
+
+    # A bar per kind of device, in its own colour
+    $rows = foreach ($g in ($script:NsGroups | Select-Object -Skip 1)) {
+        $ds = @($online | Where-Object { $g.Kinds -contains $_.Kind })
+        if ($ds.Count) { [pscustomobject]@{ Name = $g.Name; N = $ds.Count; Color = (@{ Systems = 'Cyan'; Printers = 'Yellow'; Phones = 'Magenta'; Media = 'Red'; Network = 'Green'; SmartHome = 'DarkYellow'; Unknown = 'DarkGray' }[$g.Key]) } }
+    }
+    $max = ($rows | Measure-Object N -Maximum).Maximum
+    $barW = [Math]::Max(8, [Math]::Min(30, $rule - 30))
+    foreach ($r in ($rows | Sort-Object N -Descending)) {
+        $len = [Math]::Max(1, [int][Math]::Round($r.N / [double]$max * $barW))
+        Write-Host ('  ' + $r.Name.PadRight(22)) -NoNewline -ForegroundColor Gray
+        Write-Host ($full * $len) -NoNewline -ForegroundColor $r.Color
+        Write-Host ($dim * ($barW - $len)) -NoNewline -ForegroundColor DarkGray
+        Write-Host ('  ' + $r.N) -ForegroundColor $r.Color
+    }
+    Write-Host ''
+
+    # A few facts
+    $gw = $online | Where-Object IsGateway | Select-Object -First 1
+    if ($gw) {
+        Write-Host '  Router       ' -NoNewline -ForegroundColor DarkGray
+        Write-Host $gw.Ip -NoNewline -ForegroundColor Green
+        $about = @($gw.HttpTitle, $gw.Vendor) | Where-Object { $_ } | Select-Object -First 1
+        Write-Host $(if ($about) { "  $about" } else { '' }) -ForegroundColor Gray
+    }
+    $top = @($online | Where-Object { $_.Vendor } | Group-Object Vendor | Sort-Object Count -Descending | Select-Object -First 4)
+    if ($top) {
+        Write-Host '  Top makers   ' -NoNewline -ForegroundColor DarkGray
+        $i = 0
+        foreach ($t in $top) {
+            if ($i++) { Write-Host "  $dot  " -NoNewline -ForegroundColor DarkGray }
+            Write-Host (Get-NsTrim $t.Name 22) -NoNewline -ForegroundColor White; Write-Host " $($t.Count)" -NoNewline -ForegroundColor Cyan
+        }
+        Write-Host ''
+    }
+    $fast = @($online | Where-Object { $_.LatencyMs -gt 0 -and -not $_.IsSelf } | Sort-Object LatencyMs -Descending | Select-Object -First 1)
+    if ($fast -and $fast[0].LatencyMs -ge 20) {
+        Write-Host '  Slowest      ' -NoNewline -ForegroundColor DarkGray
+        Write-Host "$(Get-NsName $fast[0])" -NoNewline -ForegroundColor White; Write-Host "  $($fast[0].LatencyMs) ms (Wi-Fi or asleep?)" -ForegroundColor Yellow
+    }
+    Write-Host ''
+
+    # Worth a look
+    $notes = Get-NsInsights $online
+    if ($notes.Count -eq 0) {
+        Write-Host '  + ' -NoNewline -ForegroundColor Green; Write-Host 'Nothing stands out: no Telnet, FTP or open screen sharing, and every device was identified.' -ForegroundColor Gray
+    } else {
+        Write-Host '  Worth a look' -ForegroundColor White
+        foreach ($n in $notes) {
+            $mark, $color = switch ($n[0]) { 'bad' { '!', 'Red' } 'warn' { '!', 'Yellow' } 'good' { '+', 'Green' } default { 'i', 'Cyan' } }
+            Write-Host "   $mark " -NoNewline -ForegroundColor $color
+            Write-NsWrapped $n[1] 5 'Gray'
+        }
+    }
+    Write-Host ('  ' + ([string][char]0x2500) * $rule) -ForegroundColor DarkCyan
 }
 
 # ======================================================================================
@@ -1290,26 +1397,49 @@ function Show-PdHeader {
 }
 # ---- end of PD header --------------------------------------------------------------------------------------------
 
+# What to scan: this PC's network(s), or another network or range the user types. Null = quit.
 function Select-NsRange($Locals) {
-    Write-Host ''
-    $i = 0
-    foreach ($l in $Locals) { $i++; Write-Host ("   [$i] $($l.Adapter)  -  $($l.Text)  (this PC $($l.LocalIp))") }
-    Write-Host '   or type a range: 192.168.1.0/24, 192.168.1.1-254, 172.16.0.20-172.16.0.80' -ForegroundColor DarkGray
-    $k = Read-NsKey '  Network'
-    if (-not $k) { return $null }
-    $n = 0
-    if ([int]::TryParse($k, [ref]$n) -and $n -ge 1 -and $n -le @($Locals).Count) { return @($Locals)[$n - 1] }
-    $r = ConvertTo-NsRange $k $Locals
-    if (-not $r) { Write-Host "  $($script:NsError)" -ForegroundColor Yellow }
-    $r
+    $count = @($Locals).Count
+    while (-not $script:NsEof) {
+        Write-Host ''
+        Write-Host '  Which network do you want to scan?' -ForegroundColor White
+        $i = 0
+        foreach ($l in $Locals) {
+            $i++
+            Write-Host "   [$i] " -NoNewline -ForegroundColor Cyan
+            Write-Host "This network: $($l.Text)" -NoNewline
+            Write-Host "   $($l.Adapter), this PC is $($l.LocalIp)" -ForegroundColor DarkGray
+        }
+        if ($count -eq 0) { Write-Host '   (no network connection found on this PC)' -ForegroundColor DarkGray }
+        Write-Host '   [A] ' -NoNewline -ForegroundColor Cyan; Write-Host 'Another network or range'
+        Write-Host '   [Q] ' -NoNewline -ForegroundColor Cyan; Write-Host 'Quit'
+        $k = Read-NsKey "  Choose$(if ($count) { ' (Enter = 1)' })"
+        if (-not $k) { if ($count) { return @($Locals)[0] } else { continue } }
+        if ($k -match '^q$') { return $null }
+        $n = 0
+        if ([int]::TryParse($k, [ref]$n)) { if ($n -ge 1 -and $n -le $count) { return @($Locals)[$n - 1] }; Write-Host "  There's no [$n]." -ForegroundColor Yellow; continue }
+        if ($k -match '^a$') {
+            $k = Read-NsKey '  Network or range (192.168.1.0/24, 192.168.1.1-254 or 172.16.0.20-172.16.0.80)'
+            if ($script:NsEof) { return $null }
+            if (-not $k) { continue }
+        }
+        # a range typed straight at the first prompt works too
+        $r = ConvertTo-NsRange $k $Locals
+        if ($r) { return $r }
+        Write-Host "  $($script:NsError)" -ForegroundColor Yellow
+    }
+    $null
 }
-
-function Start-NsConsole($Locals, [string]$Group) {
+function Start-NsConsole($Locals, [string]$Group, [bool]$Ask) {
     Show-PdHeader -Name 'pxd Network Scanner' -Version "CLI $($script:NsVersion)" -Command 'irm pxdtek.com/ns|iex'
     if ($script:NsInMemory) { Write-Host '  In-memory: nothing is saved on this PC.' -ForegroundColor DarkGray }
+    if ($Ask) {
+        $script:NsRange = Select-NsRange $Locals
+        if (-not $script:NsRange) { return }
+    }
     $onlineOnly = $false; $search = ''
     Write-Host "  Scanning $($script:NsRange.Text)$(if ($script:NsRange.Adapter) { " on $($script:NsRange.Adapter)" })..." -ForegroundColor DarkCyan
-    Invoke-NsScan $script:NsRange -Quick:$Quick
+    Invoke-NsScan $script:NsRange -Quick:$Quick; $fresh = $true
     while (-not $script:NsEof) {
         $g = $script:NsGroups | Where-Object { $_.Key -eq $Group } | Select-Object -First 1
         $items = Get-NsShown $Group $onlineOnly $search
@@ -1321,7 +1451,7 @@ function Start-NsConsole($Locals, [string]$Group) {
         Show-NsTable $items
         Write-Host ''
         $counts = ($script:NsGroups | Select-Object -Skip 1 | ForEach-Object { $k = $_; $n = @($script:NsDevices | Where-Object { $k.Kinds -contains $_.Kind -and (-not $onlineOnly -or $_.Online) }).Count; if ($n) { "$($k.Name) $n" } }) -join ', '
-        if ($counts) { Write-Host "  $counts" -ForegroundColor DarkGray }
+        if ($fresh) { Show-NsReport; $fresh = $false } elseif ($counts) { Write-Host "  $counts" -ForegroundColor DarkGray }
         Write-Host "  [number] details   T type   O online only $(if ($onlineOnly) { 'off' } else { 'on' })   S search   R rescan   N network   E export   Q quit" -ForegroundColor DarkGray
         $k = Read-NsKey '  Choose'
         switch -Regex ($k.ToLowerInvariant()) {
@@ -1334,10 +1464,10 @@ function Start-NsConsole($Locals, [string]$Group) {
             }
             '^o$' { $onlineOnly = -not $onlineOnly; break }
             '^s$' { $search = Read-NsKey '  Search name, IP, MAC, maker, model or port (Enter clears)'; break }
-            '^r$' { Write-Host "  Scanning $($script:NsRange.Text)..." -ForegroundColor DarkCyan; Invoke-NsScan $script:NsRange -Quick:$Quick; break }
+            '^r$' { Write-Host "  Scanning $($script:NsRange.Text)..." -ForegroundColor DarkCyan; Invoke-NsScan $script:NsRange -Quick:$Quick; $fresh = $true; break }
             '^n$' {
                 $r = Select-NsRange $Locals
-                if ($r) { $script:NsRange = $r; Write-Host "  Scanning $($r.Text)..." -ForegroundColor DarkCyan; Invoke-NsScan $r -Quick:$Quick }
+                if ($r) { $script:NsRange = $r; Write-Host "  Scanning $($r.Text)..." -ForegroundColor DarkCyan; Invoke-NsScan $r -Quick:$Quick; $fresh = $true }
                 break
             }
             '^e$' {
@@ -1365,7 +1495,7 @@ if ($Range) {
     if (-not $script:NsRange) { Write-Host "  $($script:NsError)" -ForegroundColor Yellow; return }
 } elseif ($locals.Count -gt 0) {
     $script:NsRange = $locals[0]
-} else {
+} elseif ($List -or $Export) {
     Write-Host '  No network connection found. Pass -Range 192.168.1.0/24 to scan a range.' -ForegroundColor Yellow; return
 }
 
@@ -1375,10 +1505,11 @@ if ($List -or $Export) {
     $items = Get-NsShown $Show $false ''
     if ($List) {
         Write-Host "  $($script:NsLastScan.Range)  -  $($script:NsLastScan.Count) device(s) answered in $([Math]::Round($script:NsLastScan.Seconds, 1)) s" -ForegroundColor DarkGray
-        Show-NsTable $items; Write-Host ''
+        Show-NsTable $items; Show-NsReport; Write-Host ''
     }
     if ($Export) { $full = Export-NsReport $Export $items; Write-Host "  Saved $full" -ForegroundColor Green }
     return
 }
 
-Start-NsConsole $locals $Show
+# Without -Range, the console asks what to scan first.
+Start-NsConsole $locals $Show (-not $Range)

@@ -8,6 +8,7 @@ Finds every device on your network and works out what each one is: PCs, servers,
 
 ## Features
 
+- **You choose what to scan when it starts:** this PC's network (one button per adapter), or another network or range you type.
 - **Scans your network in a few seconds:** pings every address, then reads Windows' ARP table, which also finds devices that ignore ping (firewalled PCs, phones).
 - **Works out what each device is** from everything it gives away:
   - the **maker** of its network card (the IEEE registry is built in, about 58,000 entries),
@@ -18,6 +19,7 @@ Finds every device on your network and works out what each one is: PCs, servers,
   - its **web page title** and server,
   - and the TTL of its ping answer (Windows, Linux or network gear).
 - **Types:** This PC, router, Windows PC, Mac, Linux server, Proxmox server, virtual machine, NAS, printer / scanner, iPhone or iPad, Android phone, smart TV, Chromecast, Apple TV, Sonos, Roku, Fire TV, game console, camera, Wi-Fi access point, switch, cellular modem, Philips Hue, Home Assistant, smart plugs, and more. Phones and tablets that hide behind a **private (random) MAC address** are recognised too.
+- **A short, colourful summary under the results** after each scan: how many devices are online and offline, how many makers, the router, a colour bar of the kinds of device, and what's **worth a look**: Telnet, FTP or screen sharing left open, Remote Desktop, devices nothing could identify, and what's new or gone since the last scan.
 - **Show** all devices, computers & servers, printers, phones & tablets, TVs & media, network gear, smart home & cameras, or the unknown ones. **Online only** hides devices seen before that didn't answer this time.
 - **Remembers devices** between scans (by MAC address, so a new IP doesn't make a new device): offline ones stay listed with when they were last seen. **Give any device a name** of your own.
 - **Search** by name, IP, MAC, maker, model, host name or port number. Sort by IP, name, type or last seen.
@@ -39,7 +41,7 @@ The console edition does the same scan in any PowerShell window:
 irm pxdtek.com/ns | iex
 ```
 
-It shows the devices with their type, maker and model; type a number for a device's details, **T** to pick a type, **O** for online only, **S** to search, **R** to rescan, **N** for another network or range, **E** to export. Nothing is installed or saved unless you export; the maker list is downloaded into memory each run.
+It first asks what to scan: this PC's network (Enter), or **A** for another network or range (`-Range` skips the question). Then it shows the devices with their type, maker and model, and a colourful summary under them; type a number for a device's details, **T** to pick a type, **O** for online only, **S** to search, **R** to rescan, **N** for another network or range, **E** to export. Nothing is installed or saved unless you export; the maker list is downloaded into memory each run.
 
 With options:
 

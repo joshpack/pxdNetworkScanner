@@ -20,7 +20,81 @@ public sealed partial class MainWindow
     private Device? _selected;
     private bool _refreshing;
 
-    private static readonly string[] Sorts = ["Sort: IP address", "Sort: name", "Sort: type", "Sort: last seen"];
+    // ---------- Start: which network to scan ----------
+
+    private readonly Border _start = new() { Background = Brush("#0E1015"), CornerRadius = new CornerRadius(8), BorderBrush = Brush("#272C39"), BorderThickness = new Thickness(1) };
+    private readonly TextBox _startCustom = new() { PlaceholderText = "192.168.1.0/24, 192.168.1.1-254 or 172.16.0.20-172.16.0.80" };
+
+    /// <summary>The scan summary card is showing under the list.</summary>
+    public bool SummaryShowing => _summary.IsVisible;
+
+    /// <summary>The start choices are showing (before the first scan).</summary>
+    public bool ShowingStart => _start.IsVisible;
+
+    private Control BuildStart()
+    {
+        var s = new StackPanel { Spacing = 10, MaxWidth = 540, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(24) };
+        s.Children.Add(new TextBlock { Text = "", FontFamily = Glyphs, FontSize = 36, Foreground = Brush("#00C8FF"), HorizontalAlignment = HorizontalAlignment.Center });
+        s.Children.Add(new TextBlock { Text = "Which network do you want to scan?", FontSize = 18, FontWeight = FontWeight.Bold, HorizontalAlignment = HorizontalAlignment.Center });
+        s.Children.Add(new TextBlock { Text = "Pick this PC's network, or type another network or range.", Classes = { "muted" }, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 6) });
+
+        for (var i = 0; i < _ranges.Count; i++)
+        {
+            var index = i;
+            var r = _ranges[i];
+            var g = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+            var left = new StackPanel();
+            left.Children.Add(new TextBlock { Text = "Scan this network", FontWeight = FontWeight.SemiBold, FontSize = 14 });
+            left.Children.Add(new TextBlock { Text = $"{r.Adapter}  ·  this PC is {r.LocalIp}", FontSize = 11.5, Opacity = 0.75 });
+            g.Children.Add(left);
+            var text = new TextBlock { Text = r.Text, FontFamily = Mono, FontSize = 14, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16, 0, 0, 0) };
+            Grid.SetColumn(text, 1);
+            g.Children.Add(text);
+            var b = new Button { Content = g, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(16, 10) };
+            if (i == 0) b.Classes.Add("primary");
+            b.Click += async (_, _) =>
+            {
+                _network.SelectedIndex = index;
+                await ScanAsync();
+            };
+            s.Children.Add(b);
+        }
+
+        if (_ranges.Count == 0)
+            s.Children.Add(new TextBlock { Text = "No network connection was found on this PC.", Classes = { "muted" }, HorizontalAlignment = HorizontalAlignment.Center });
+
+        s.Children.Add(new TextBlock { Text = "ANOTHER NETWORK OR RANGE", Classes = { "label" }, Margin = new Thickness(2, 10, 0, 0) });
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        _startCustom.Text = _settings.CustomRange;
+        row.Children.Add(_startCustom);
+        var go = new Button { Content = "Scan", Margin = new Thickness(8, 0, 0, 0), MinWidth = 90 };
+        if (_ranges.Count == 0) go.Classes.Add("primary");
+        Grid.SetColumn(go, 1);
+        row.Children.Add(go);
+        s.Children.Add(row);
+        go.Click += async (_, _) => await StartCustomAsync();
+        _startCustom.KeyDown += async (_, e) =>
+        {
+            if (e.Key == Avalonia.Input.Key.Enter) await StartCustomAsync();
+        };
+        return new ScrollViewer { Content = s };
+    }
+
+    private async Task StartCustomAsync()
+    {
+        var text = (_startCustom.Text ?? "").Trim();
+        if (ScanRange.Parse(text, out var error) is null)
+        {
+            ShowNotice(error);
+            return;
+        }
+
+        _custom.Text = text;
+        _network.SelectedIndex = _ranges.Count;   // "Custom range…"
+        await ScanAsync();
+    }
+
+    private static readonly string[] Sorts =["Sort: IP address", "Sort: name", "Sort: type", "Sort: last seen"];
 
     private Control BuildToolbar()
     {
@@ -49,11 +123,121 @@ public sealed partial class MainWindow
         var host = new Grid();
         host.Children.Add(_list);
         host.Children.Add(_empty);
-        g.Children.Add(host);
+        _start.Child = BuildStart();
+        host.Children.Add(_start);
+        // the device list, with the scan summary under it
+        var left = new Grid { RowDefinitions = new RowDefinitions("*,Auto") };
+        left.Children.Add(host);
+        Grid.SetRow(_summary, 1);
+        left.Children.Add(_summary);
+        g.Children.Add(left);
         Grid.SetColumn(_details, 1);
         g.Children.Add(_details);
         ShowDetails();
         return g;
+    }
+
+    // ---------- The scan summary under the list ----------
+
+    private readonly Border _summary = new() { Classes = { "card" }, Padding = new Thickness(16, 12), Margin = new Thickness(0, 10, 0, 0), IsVisible = false };
+    private List<Device> _added = [];
+    private List<Device> _gone = [];
+
+    private static readonly string[] GroupColors = ["#E8EAF0", "#00C8FF", "#F5B14C", "#B98CFF", "#FF7AB6", "#19F58C", "#FFD23F", "#8A92A6"];
+
+    /// <summary>Headline numbers, a colour bar of the kinds of device, and up to three things worth a look.</summary>
+    private void RefreshSummary()
+    {
+        var online = _store.Items.Where(d => d.Online).OrderBy(d => d.IpSort).ToList();
+        _summary.IsVisible = online.Count > 0 && !_start.IsVisible && !Scanning;
+        if (!_summary.IsVisible) return;
+        var offline = _store.Items.Count - online.Count;
+        var s = new StackPanel { Spacing = 9 };
+
+        // 19 online · 2 offline · 10 makers · 6.4 s
+        var head = new TextBlock { FontSize = 13 };
+        void Num(string n, string label, string color)
+        {
+            if (head.Inlines!.Count > 0) head.Inlines.Add(new Avalonia.Controls.Documents.Run("   ·   ") { Foreground = Muted });
+            head.Inlines.Add(new Avalonia.Controls.Documents.Run(n) { Foreground = Brush(color), FontWeight = FontWeight.Bold, FontSize = 15 });
+            head.Inlines.Add(new Avalonia.Controls.Documents.Run(" " + label) { Foreground = Muted });
+        }
+
+        head.Inlines = [];
+        Num(online.Count.ToString(), "online", "#19F58C");
+        if (offline > 0) Num(offline.ToString(), "offline", "#8A92A6");
+        Num(online.Where(d => d.Vendor.Length > 0).Select(d => d.Vendor).Distinct().Count().ToString(), "makers", "#00C8FF");
+        if (_scanTook > TimeSpan.Zero) Num($"{_scanTook.TotalSeconds:0.0} s", "to scan", "#FF7AB6");
+        var gw = online.FirstOrDefault(d => d.IsGateway);
+        if (gw is not null) Num(gw.Ip, "router", "#19F58C");
+        s.Children.Add(head);
+
+        // One bar split by kind of device, with a legend
+        var counts = Enumerable.Range(1, Classifier.Groups.Length - 1).Select(i => (Index: i, N: online.Count(d => InGroup(d, i)))).Where(x => x.N > 0).OrderByDescending(x => x.N).ToList();
+        var bar = new Grid { Height = 10, ClipToBounds = true };
+        var col = 0;
+        foreach (var (i, n) in counts)
+        {
+            bar.ColumnDefinitions.Add(new ColumnDefinition(n, GridUnitType.Star));
+            var seg = new Border { Background = Brush(GroupColors[i]), Margin = new Thickness(col == 0 ? 0 : 2, 0, 0, 0), CornerRadius = new CornerRadius(3) };
+            ToolTip.SetTip(seg, $"{Classifier.Groups[i].Name}: {n}");
+            Grid.SetColumn(seg, col++);
+            bar.Children.Add(seg);
+        }
+
+        s.Children.Add(bar);
+        var legend = new WrapPanel { ItemSpacing = 16, LineSpacing = 4 };
+        foreach (var (i, n) in counts)
+        {
+            var item = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            item.Children.Add(new Ellipse { Width = 8, Height = 8, Fill = Brush(GroupColors[i]), VerticalAlignment = VerticalAlignment.Center });
+            item.Children.Add(new TextBlock { Text = Classifier.Groups[i].Name, FontSize = 12, Foreground = Muted });
+            item.Children.Add(new TextBlock { Text = n.ToString(), FontSize = 12, FontWeight = FontWeight.Bold, Foreground = Brush(GroupColors[i]) });
+            legend.Children.Add(item);
+        }
+
+        s.Children.Add(legend);
+
+        // Worth a look
+        var notes = Summary.Insights(online, _added, _gone);
+        if (notes.Count == 0)
+            notes.Add((Summary.Level.Good, "Nothing stands out: no Telnet, FTP or open screen sharing, and every device was identified."));
+        foreach (var (level, text) in notes.Take(3))
+        {
+            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("18,*") };
+            var (mark, color) = level switch
+            {
+                Summary.Level.Bad => ("!", "#F2666A"),
+                Summary.Level.Warn => ("!", "#F5B14C"),
+                Summary.Level.Good => ("✓", "#19F58C"),
+                _ => ("i", "#00C8FF"),
+            };
+            row.Children.Add(new TextBlock { Text = mark, FontWeight = FontWeight.Bold, Foreground = Brush(color) });
+            var t = new TextBlock { Text = text, FontSize = 12, TextWrapping = TextWrapping.Wrap, MaxLines = 2, TextTrimming = TextTrimming.CharacterEllipsis };
+            ToolTip.SetTip(t, text);
+            Grid.SetColumn(t, 1);
+            row.Children.Add(t);
+            s.Children.Add(row);
+        }
+
+        if (notes.Count > 3) s.Children.Add(new TextBlock { Text = $"and {notes.Count - 3} more", FontSize = 11, Foreground = Muted, Margin = new Thickness(18, 0, 0, 0) });
+        _summary.Child = s;
+    }
+
+    /// <summary>What changed since the previous scan of the same network: called before and after a scan.</summary>
+    private HashSet<Device> _wasOnline = [];
+    private bool _hadDevices;
+
+    private void BeforeScan(ScanRange range)
+    {
+        _wasOnline = _store.Items.Where(d => d.Online && System.Net.IPAddress.TryParse(d.Ip, out var a) && range.Contains(a)).ToHashSet();
+        _hadDevices = _store.Items.Count > 0;
+    }
+
+    private void AfterScan(DateTime started)
+    {
+        _added = _hadDevices ? _store.Items.Where(d => d.Online && d.FirstSeen >= started).OrderBy(d => d.IpSort).ToList() : [];
+        _gone = _wasOnline.Where(d => !d.Online && _store.Items.Contains(d)).OrderBy(d => d.IpSort).ToList();
     }
 
     /// <summary>The devices the sidebar group, the online switch and the search box let through, in the chosen order.</summary>
@@ -99,11 +283,12 @@ public sealed partial class MainWindow
         var offline = _store.Items.Count - online;
         _title.Text = Classifier.Groups[_group].Name;
         _subtitle.Text = _scannedRange.Length == 0 && _store.Items.Count == 0
-            ? "Press Scan to find everything on your network."
+            ? "Pick a network to scan: this PC's, or type another network or range."
             : $"{(_scannedRange.Length > 0 ? _scannedRange + "  ·  " : "")}{online} online{(offline > 0 ? $", {offline} offline" : "")}"
               + (_scannedAt != default ? $"  ·  scanned {_scannedAt:HH:mm} in {_scanTook.TotalSeconds:0.0} s" : Scanning ? "  ·  scanning…" : "")
               + (shown.Count != _store.Items.Count ? $"  ·  showing {shown.Count}" : "");
-        _empty.IsVisible = shown.Count == 0;
+        _empty.IsVisible = shown.Count == 0 && !_start.IsVisible;
+        RefreshSummary();
         _empty.Text = Scanning ? "Looking…"
             : _store.Items.Count == 0 ? "No devices yet. Pick your network at the top and press Scan."
             : (_search.Text ?? "").Trim().Length > 0 ? "Nothing matches that search."

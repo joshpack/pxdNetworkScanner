@@ -340,8 +340,37 @@ internal static class SelfTest
     private static async Task Render(List<Device> devices)
     {
         R.AppendLine("== Window ==");
+        // Opening shows the start choices: one button per network of this PC, plus another network or range.
+        var first = new MainWindow(new DeviceStore(null), showStart: true)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Position = new PixelPoint(-30000, -30000),
+            ShowActivated = false,
+            ShowInTaskbar = false,
+            SelfTestMode = true,
+        };
+        first.Show();
+        first.UpdateLayout();
+        await Task.Delay(150);
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        var startButtons = first.GetLogicalDescendants().OfType<Button>().Count(b => b.IsEffectivelyVisible && (b.Content is Grid || b.Content as string == "Scan") && b.Classes.Contains("pxd-caption") is false);
+        Check("Opens on the start choices, without scanning", first.ShowingStart && !first.Scanning && first.Store.Items.Count == 0);
+        Check("A choice per network plus another range", startButtons >= ScanRange.Local().Count + 1, $"{startButtons} buttons, {ScanRange.Local().Count} network(s)");
+        if (!Sample)
+        {
+            using var sbmp = new RenderTargetBitmap(new PixelSize(1240, 820));
+            sbmp.Render(first);
+            sbmp.Save(Path.Combine(Dir!, "start.png"), PngBitmapEncoderOptions.Default);
+        }
+
+        first.SetDevices([], "network", TimeSpan.Zero);
+        Check("Start choices hide once there are results", !first.ShowingStart);
+        var notes = Summary.Insights([new Device { Ip = "1.1.1.1", Ports = [23] }, new Device { Ip = "1.1.1.2", Ports = [21, 3389] }, Done(new Device { Ip = "1.1.1.3" })], [], []);
+        Check("Summary flags Telnet, FTP, Remote Desktop and unknown devices", notes.Count == 4 && notes[0].Level == Summary.Level.Bad && notes.Any(n => n.Text.Contains("FTP")) && notes.Any(n => n.Level == Summary.Level.Info), string.Join(" / ", notes.Select(n => n.Text)));
+        first.Close();
+
         var store = new DeviceStore(null);
-        var window = new MainWindow(store, autoScan: false)
+        var window = new MainWindow(store, showStart: false)
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             Position = new PixelPoint(-30000, -30000),
@@ -375,6 +404,7 @@ internal static class SelfTest
         await Shot("computers", 1, d => d.Kind == DeviceKind.Server);
         await Shot("media", 4, d => d.Kind == DeviceKind.Media);
         var counts = Enumerable.Range(0, Classifier.Groups.Length).Select(i => { window.ShowGroup(i); return window.Visible().Count(); }).ToList();
+        Check("Summary card under the list after a scan", window.SummaryShowing);
         Check("Every device is in exactly one group", counts.Skip(1).Sum() == counts[0], string.Join(",", counts));
 
         var all = window.GetLogicalDescendants().ToList();
@@ -385,7 +415,7 @@ internal static class SelfTest
         R.AppendLine();
     }
 
-    private static MainWindow OffScreen() => new(new DeviceStore(null), autoScan: false)
+    private static MainWindow OffScreen() => new(new DeviceStore(null), showStart: false)
     {
         WindowStartupLocation = WindowStartupLocation.Manual,
         Position = new PixelPoint(-30000, -30000),

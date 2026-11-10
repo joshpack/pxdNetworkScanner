@@ -7,7 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>pxdNetworkScanner</RootNamespace>
     <AssemblyName>pxdNetworkScanner</AssemblyName>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Product>pxd Network Scanner</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Rendered by the app's write-icon option (see README); a fresh clone builds without it. -->

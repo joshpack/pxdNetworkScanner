@@ -50,11 +50,11 @@ public sealed partial class MainWindow : Window
     public DeviceStore Store => _store;
     public static readonly string[] GroupNames = Classifier.Groups.Select(g => g.Name).ToArray();
 
-    public MainWindow() : this(new DeviceStore(Path.Combine(Program.DataFolder, "devices.json")), autoScan: true)
+    public MainWindow() : this(new DeviceStore(Path.Combine(Program.DataFolder, "devices.json")), showStart: true)
     {
     }
 
-    public MainWindow(DeviceStore store, bool autoScan)
+    public MainWindow(DeviceStore store, bool showStart)
     {
         _store = store;
         _settings = Settings.Load();
@@ -125,7 +125,9 @@ public sealed partial class MainWindow : Window
             if (e.Key == Key.F5) _ = ScanAsync();
             else if (e.Key == Key.F && e.KeyModifiers.HasFlag(KeyModifiers.Control)) _search.Focus();
         };
-        if (autoScan) Opened += async (_, _) => await ScanAsync();
+        // Opens on the start choices (this PC's network, or another one) rather than scanning straight away.
+        if (!showStart) _start.IsVisible = false;
+        Refresh();
     }
 
     // ---------- Shell ----------
@@ -288,6 +290,7 @@ public sealed partial class MainWindow : Window
 
         var range = CurrentRange();
         if (range is null) return;
+        _start.IsVisible = false;
         _notice.IsVisible = false;
         _cts = new CancellationTokenSource();
         _scan.Content = "Stop";
@@ -295,6 +298,8 @@ public sealed partial class MainWindow : Window
         _progress.Value = 0;
         _progress.IsVisible = true;
         _status.Text = $"Scanning {range.Text}…";
+        BeforeScan(range);
+        var started = DateTime.Now.AddSeconds(-1);
         _store.BeginScan(range);
         _scannedRange = range.Text;
         Refresh();
@@ -317,6 +322,7 @@ public sealed partial class MainWindow : Window
             var result = await Task.Run(() => Scanner.RunAsync(range, new ScanOptions(), progress, Update, cts.Token));
             await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);   // let queued updates land first
             foreach (var d in result.Devices) _store.Merge(d);
+            AfterScan(started);
             _store.Save();
             _scannedAt = DateTime.Now;
             _scanTook = result.Elapsed;
@@ -344,6 +350,7 @@ public sealed partial class MainWindow : Window
     /// <summary>Shows given devices as if a scan had found them (self-test and README screenshots).</summary>
     public void SetDevices(IEnumerable<Device> devices, string range, TimeSpan took, bool sample = false)
     {
+        _start.IsVisible = false;
         if (sample)
         {
             // Screenshots show the made-up network in the picker too, never this PC's real one.
