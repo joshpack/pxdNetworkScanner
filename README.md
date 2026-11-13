@@ -27,7 +27,7 @@ Finds every device on your network and works out what each one is: PCs, servers,
 - **Export** what's shown as a web page, CSV (Excel), JSON or text.
 - **Any network:** pick an adapter, or type a range: `192.168.1.0/24`, `192.168.1.1-254`, `172.16.0.20-172.16.0.80` (up to 4,096 addresses).
 - **Needs no administrator rights** and installs no drivers. It only asks devices questions they answer to anyone on the network.
-- **pxd standard:** dark pxd title bar, remembers its window, one copy at a time, installed and kept up to date by **[pxd Toolkit](https://github.com/joshpack/pxdToolkit)**.
+- **pxd standard:** dark pxd title bar, remembers its window, one copy at a time, installed and kept up to date by **[pxd Toolkit](https://github.com/pxdtek/pxdToolkit)**.
 
 | Computers & servers | TVs & media |
 | --- | --- |
@@ -62,10 +62,10 @@ With options:
 
 ## Install
 
-- **With [pxd Toolkit](https://github.com/joshpack/pxdToolkit)** (recommended): pick pxd Network Scanner and press Install. The Toolkit keeps it up to date.
-- **By hand:** download `pxdNetworkScanner-<version>-win-x64.zip` from [Releases](https://github.com/joshpack/pxdNetworkScanner/releases), unzip it anywhere and run `pxdNetworkScanner.exe`. It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+- **With [pxd Toolkit](https://github.com/pxdtek/pxdToolkit)** (recommended): pick pxd Network Scanner and press Install. The Toolkit keeps it up to date.
+- **By hand:** download `pxdNetworkScanner-<version>-win-x64.zip` from [Releases](https://github.com/pxdtek/pxdNetworkScanner/releases), unzip it anywhere and run `pxdNetworkScanner.exe`. It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
 
-Each time the app starts, it checks for a newer release and installs it into its own folder before opening (a few seconds at most; it just opens when offline). `--report` runs don't update. A saved copy of the PowerShell script does the same: run from a file, it replaces itself with the latest release's script and runs that; through `irm | iex` it's already the latest. Set `PXD_NO_UPDATE=1` to turn either off.
+Each time the app starts, it checks for a newer release (at pxdtek.com, or GitHub when pxdtek.com can't be reached) and installs it into its own folder before opening (a few seconds at most; it just opens when offline). `--report` runs don't update. A saved copy of the PowerShell script does the same: run from a file, it replaces itself with the latest release's script and runs that; through `irm | iex` it's already the latest. Set `PXD_NO_UPDATE=1` to turn either off.
 
 Settings and remembered devices are kept in `%APPDATA%\pxdNetworkScanner`.
 

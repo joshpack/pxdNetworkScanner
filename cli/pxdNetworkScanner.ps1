@@ -10,7 +10,7 @@
         irm pxdtek.com/ns | iex
 
     (pxdtek.com serves the latest copy of
-        https://raw.githubusercontent.com/joshpack/pxdNetworkScanner/main/cli/pxdNetworkScanner.ps1)
+        https://raw.githubusercontent.com/pxdtek/pxdNetworkScanner/main/cli/pxdNetworkScanner.ps1)
 
     It pings every address on the network, reads the ARP table (which also finds devices that ignore
     ping), then asks each device what it is: open ports, DNS / NetBIOS / Bonjour names, UPnP and SNMP
@@ -46,7 +46,7 @@ param(
     [switch]$Quick
 )
 
-$script:NsVersion = '1.0.2'
+$script:NsVersion = '1.0.3'
 $script:NsUrl = 'pxdtek.com/ns'
 # In-memory mode (set by the pxd Toolkit console while it runs this script): nothing is saved on the PC unless the
 # user exports a report. The CLI keeps no settings, logs or caches anyway.
@@ -68,33 +68,101 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # Run from a file (installed by the pxd Toolkit, or saved by hand): if a newer release exists, this file is replaced
 # with it and the new copy runs with the same parameters. Through irm | iex the copy is already the latest, so nothing
 # happens; nor in-memory (PXD_INMEMORY=1) or with PXD_NO_UPDATE=1. Never stops the script: any problem and it just runs.
-# PXD_UPDATE_API / PXD_UPDATE_RAW point the check at another server (tests).
+# Everything is asked at pxdtek.com first (it fetches from GitHub on its side); GitHub itself is only the fallback when
+# pxdtek.com fails, times out or answers with a web page (a filter's block page is never run, read or saved).
+# Tests: PXD_UPDATE_MIRROR (pxdtek.com), PXD_UPDATE_GITHUB_API, PXD_UPDATE_GITHUB, PXD_UPDATE_GITHUB_RAW point at
+# other servers; PXD_UPDATE_API replaces both release-info sources, as in the apps.
 $script:NsSelf = $MyInvocation.MyCommand.Path
+$script:NsMarker = "`$script:NsUrl = 'pxdtek.com/ns'"
+
+function Get-NsFetch([string]$Url, [int]$TimeoutSec) {
+    # The body as bytes, or $null when it failed or came back as a web page instead of the file
+    if (-not $Url) { return $null }
+    $h = $null
+    try {
+        $h = New-Object System.Net.Http.HttpClient
+        $h.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+        $h.DefaultRequestHeaders.UserAgent.ParseAdd('pxd-update/1.0')
+        $r = $h.GetAsync($Url).GetAwaiter().GetResult()
+        if (-not $r.IsSuccessStatusCode) { return $null }
+        $type = if ($r.Content.Headers.ContentType) { [string]$r.Content.Headers.ContentType.MediaType } else { '' }
+        $b = $r.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        # A web filter's block page is HTML; a script may start with a '<#' help comment, so only real HTML counts.
+        $head = [Text.Encoding]::UTF8.GetString($b, 0, [Math]::Min(512, $b.Length)).TrimStart([char]0xFEFF)
+        if ($b.Length -eq 0 -or $type -match 'html' -or $head -match '^\s*<(!doctype|html|head|body|meta|title|script|div|\?xml)') { return $null }
+        return , $b
+    } catch {
+        return $null
+    } finally {
+        if ($h) { $h.Dispose() }
+    }
+}
+
+function Get-NsGitHubCopy([string]$Url, [string]$Mirror, [string]$GitHub) {
+    # pxdtek.com's copy of a release download -> the same file on GitHub (the fallback)
+    if ($Url -match ('^' + [regex]::Escape($Mirror) + '/dl/([^/]+)/([^/]+)/([^/]+)$')) { "$GitHub/pxdtek/$($Matches[1])/releases/download/$($Matches[2])/$($Matches[3])" }
+}
+
+function Get-NsScriptVersion([string]$Text) {
+    if ($Text -match "NsVersion = '(\d+)\.(\d+)(?:\.(\d+))?'") { New-Object Version ([int]$Matches[1]), ([int]$Matches[2]), ([int]('0' + $Matches[3])) }
+}
+
 function Update-NsScript {
     $self = $script:NsSelf
     if (-not $self -or -not (Test-Path -LiteralPath $self) -or $env:PXD_INMEMORY -eq '1' -or $env:PXD_NO_UPDATE -eq '1') { return $false }
     $tmp = "$self.pxdnew"
     try {
-        if (-not ([IO.File]::ReadAllText($self)).Contains("`$script:NsUrl = 'pxdtek.com/ns'")) { return $false }   # not this script
-        $api = if ($env:PXD_UPDATE_API) { $env:PXD_UPDATE_API.TrimEnd('/') } else { 'https://api.github.com' }
-        $raw = if ($env:PXD_UPDATE_RAW) { $env:PXD_UPDATE_RAW.TrimEnd('/') } else { 'https://raw.githubusercontent.com' }
-        $headers = @{ 'User-Agent' = 'pxd-update/1.0'; 'Accept' = 'application/vnd.github+json' }
-        $rel = Invoke-RestMethod -Uri "$api/repos/joshpack/pxdNetworkScanner/releases/latest" -Headers $headers -TimeoutSec 4 -UseBasicParsing
-        if ([string]$rel.tag_name -notmatch '(\d+)\.(\d+)(?:\.(\d+))?') { return $false }
+        if (-not ([IO.File]::ReadAllText($self)).Contains($script:NsMarker)) { return $false }   # not this script
+        $mirror = if ($env:PXD_UPDATE_MIRROR) { $env:PXD_UPDATE_MIRROR.TrimEnd('/') } else { 'https://pxdtek.com' }
+        $ghApi = if ($env:PXD_UPDATE_GITHUB_API) { $env:PXD_UPDATE_GITHUB_API.TrimEnd('/') } else { 'https://api.github.com' }
+        $gh = if ($env:PXD_UPDATE_GITHUB) { $env:PXD_UPDATE_GITHUB.TrimEnd('/') } else { 'https://github.com' }
+        $ghRaw = if ($env:PXD_UPDATE_GITHUB_RAW) { $env:PXD_UPDATE_GITHUB_RAW.TrimEnd('/') } else { 'https://raw.githubusercontent.com' }
+        $current = [Version]$script:NsVersion
+
+        # Release info: pxdtek.com, then GitHub. Only JSON with a tag counts.
+        $infoBases = if ($env:PXD_UPDATE_API) { @($env:PXD_UPDATE_API.TrimEnd('/')) } else { @("$mirror/gh", $ghApi) }
+        $rel = $null
+        foreach ($base in $infoBases) {
+            $b = Get-NsFetch "$base/repos/pxdtek/pxdNetworkScanner/releases/latest" 4
+            if (-not $b) { continue }
+            try { $j = [Text.Encoding]::UTF8.GetString($b) | ConvertFrom-Json } catch { continue }
+            if ($j -and [string]$j.tag_name) { $rel = $j; break }
+        }
+        if (-not $rel -or [string]$rel.tag_name -notmatch '(\d+)\.(\d+)(?:\.(\d+))?') { return $false }
         $latest = New-Object Version ([int]$Matches[1]), ([int]$Matches[2]), ([int]('0' + $Matches[3]))
-        if ($latest -le [Version]$script:NsVersion) { return $false }
+        if ($latest -le $current) { return $false }
+
+        # The script: the release's own copy (with its checksum when listed), else the repo's, each pxdtek.com first.
         $asset = @($rel.assets) | Where-Object { $_.name -eq 'pxdNetworkScanner.ps1' } | Select-Object -First 1
         $sum = @($rel.assets) | Where-Object { $_.name -eq 'pxdNetworkScanner.ps1.sha256' } | Select-Object -First 1
-        $url = if ($asset) { $asset.browser_download_url } else { "$raw/joshpack/pxdNetworkScanner/$($rel.tag_name)/cli/pxdNetworkScanner.ps1" }
-        Write-Host "  Updating pxd Network Scanner to $latest..." -ForegroundColor DarkGray
-        Invoke-WebRequest -Uri $url -OutFile $tmp -Headers @{ 'User-Agent' = 'pxd-update/1.0' } -TimeoutSec 30 -UseBasicParsing
+        $urls = if ($asset) { @($asset.browser_download_url, (Get-NsGitHubCopy $asset.browser_download_url $mirror $gh)) }
+        else { @("$mirror/raw/pxdNetworkScanner/cli/pxdNetworkScanner.ps1", "$ghRaw/pxdtek/pxdNetworkScanner/HEAD/cli/pxdNetworkScanner.ps1") }
+        $want = $null
         if ($sum) {
-            $want = [regex]::Match([string](Invoke-RestMethod -Uri $sum.browser_download_url -Headers @{ 'User-Agent' = 'pxd-update/1.0' } -TimeoutSec 10 -UseBasicParsing), '[0-9a-fA-F]{64}').Value
-            if ($want -and $want -ne (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash) { throw 'checksum mismatch' }
+            foreach ($u in @($sum.browser_download_url, (Get-NsGitHubCopy $sum.browser_download_url $mirror $gh))) {
+                $b = Get-NsFetch $u 10
+                if ($b) { $m = [regex]::Match([Text.Encoding]::ASCII.GetString($b), '[0-9a-fA-F]{64}'); if ($m.Success) { $want = $m.Value; break } }
+            }
+            if (-not $want) { return $false }   # a checksum is listed but couldn't be read: don't take the file unchecked
         }
-        if (-not ([IO.File]::ReadAllText($tmp)).Contains("`$script:NsUrl = 'pxdtek.com/ns'")) { throw 'not the scanner script' }
-        Move-Item -LiteralPath $tmp -Destination $self -Force
-        return $true
+
+        Write-Host "  Updating pxd Network Scanner to $latest..." -ForegroundColor DarkGray
+        foreach ($u in $urls) {
+            $b = Get-NsFetch $u 30
+            if (-not $b) { continue }
+            if ($want) {
+                $sha = New-Object System.Security.Cryptography.SHA256Managed
+                $got = -join ($sha.ComputeHash($b) | ForEach-Object { $_.ToString('x2') }); $sha.Dispose()
+                if ($got -ne $want.ToLowerInvariant()) { continue }
+            }
+            $text = [Text.Encoding]::UTF8.GetString($b)
+            $v = Get-NsScriptVersion $text
+            if (-not $text.Contains($script:NsMarker) -or -not $v -or $v -le $current) { continue }   # not this script, or not newer
+            [IO.File]::WriteAllBytes($tmp, $b)
+            Move-Item -LiteralPath $tmp -Destination $self -Force
+            return $true
+        }
+        return $false
     } catch {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
         return $false

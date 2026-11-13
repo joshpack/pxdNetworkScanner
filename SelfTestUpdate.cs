@@ -41,6 +41,8 @@ internal static class SelfTestUpdate
         listener.Start();
         var hits = 0;
         var badSum = false;
+        var blocked = false;   // every answer is a web filter's block page (HTML, status 200)
+        const string blockPage = "<!DOCTYPE html><html><head><title>Access denied</title></head><body>This site is blocked by your network.</body></html>";
         var serving = Task.Run(async () =>
         {
             while (listener.IsListening)
@@ -48,8 +50,9 @@ internal static class SelfTestUpdate
                 System.Net.HttpListenerContext ctx;
                 try { ctx = await listener.GetContextAsync(); } catch { return; }
                 Interlocked.Increment(ref hits);
-                byte[] body = ctx.Request.Url!.AbsolutePath switch
+                byte[] body = blocked ? Encoding.UTF8.GetBytes(blockPage) : ctx.Request.Url!.AbsolutePath switch
                 {
+                    "/blocked" => Encoding.UTF8.GetBytes(blockPage),
                     var p when p == $"/repos/{Program.UpdateRepo}/releases/latest" => Encoding.UTF8.GetBytes(
                         $"{{\"tag_name\":\"v9.9.9\",\"assets\":[{{\"name\":\"{app}-9.9.9-linux-x64.tar.gz\",\"browser_download_url\":\"{prefix}other\"}}," +
                         $"{{\"name\":\"{zipName}\",\"browser_download_url\":\"{prefix}zip\"}},{{\"name\":\"{zipName}.sha256\",\"browser_download_url\":\"{prefix}sum\"}}]}}"),
@@ -94,6 +97,31 @@ internal static class SelfTestUpdate
             badSum = true;
             var refused = !await pxdUpdate.ApplyAsync(prefix + "zip", prefix + "sum", install, exe, [], start: false);
             Check("Update: a wrong checksum changes nothing", refused && File.ReadAllText(exe) == "old exe");
+            badSum = false;
+
+            // A web filter's block page (HTML) is never taken for the real thing.
+            var zipBlocked = !await pxdUpdate.ApplyAsync(prefix + "blocked", null, install, exe, [], start: false);
+            Check("Update: a block page instead of the zip changes nothing", zipBlocked && File.ReadAllText(exe) == "old exe"
+                && Directory.GetFiles(install, "*.pxdold").Length == 0);
+            var sumBlocked = !await pxdUpdate.ApplyAsync(prefix + "zip", prefix + "blocked", install, exe, [], start: false);
+            Check("Update: a block page instead of the checksum refuses the update", sumBlocked && File.ReadAllText(exe) == "old exe"
+                && Directory.GetFiles(install, "*.pxdold").Length == 0);
+            blocked = true;
+            var infoBlocked = await pxdUpdate.FindUpdateAsync(Program.UpdateRepo, Program.UpdateAsset, new Version(1, 0, 0));
+            blocked = false;
+            Check("Update: a block page instead of the release info is not read as a release", infoBlocked is null);
+
+            // Where it asks (no network here): pxdtek.com first, then GitHub; pxdtek.com downloads map to the same file on GitHub.
+            Environment.SetEnvironmentVariable("PXD_UPDATE_API", null);
+            var bases = pxdUpdate.ApiBases();
+            Environment.SetEnvironmentVariable("PXD_UPDATE_API", prefix.TrimEnd('/'));
+            Check("Update: release info asked at pxdtek.com first, GitHub as the fallback",
+                bases is ["https://pxdtek.com/gh", "https://api.github.com"], string.Join(", ", bases));
+            var repoName = Program.UpdateRepo.Split('/')[1];
+            Check("Update: a pxdtek.com download falls back to the same file under github.com/pxdtek",
+                pxdUpdate.GitHubCopy($"https://pxdtek.com/dl/{repoName}/v9.9.9/{zipName}") == $"https://github.com/pxdtek/{repoName}/releases/download/v9.9.9/{zipName}"
+                && pxdUpdate.GitHubCopy(prefix + "zip") is null);
+            Check("Update: the repo is under the pxdtek organization", Program.UpdateRepo.StartsWith("pxdtek/", StringComparison.Ordinal));
         }
         catch (Exception ex)
         {
